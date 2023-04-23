@@ -28,6 +28,12 @@ ImageProcessor::ImageProcessor(ros::NodeHandle& n) :
   is_first_img(true),
   //img_transport(n),
   stereo_sub(10),
+  // GridFeatures定义：
+  //  typedef std::map<int, std::vector<FeatureMetaData> > GridFeatures;
+  
+  // prev_features_ptr定义
+  // boost::shared_ptr<GridFeatures> prev_features_ptr;
+  // boost::shared_ptr<GridFeatures> curr_features_ptr;
   prev_features_ptr(new GridFeatures()),
   curr_features_ptr(new GridFeatures()) {
   return;
@@ -396,7 +402,7 @@ void ImageProcessor::initializeFirstFrame() {
     if (inlier_markers[i] == 0) continue;
     cam0_inliers.push_back(cam0_points[i]);
     cam1_inliers.push_back(cam1_points[i]);
-    response_inliers.push_back(new_features[i].response);
+    response_inliers.push_back(new_features[i].response);//像素强度
   }
 
   // Group the features into grids
@@ -437,7 +443,9 @@ void ImageProcessor::initializeFirstFrame() {
       processor_config.grid_row*processor_config.grid_col; ++code) {
     // 将当前的关键点保存到curr_features_ptr
     vector<FeatureMetaData>& features_this_grid = (*curr_features_ptr)[code];
-    vector<FeatureMetaData>& new_features_this_grid = grid_new_features[code];
+    // ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ 
+    // | | | | | | | | | |  将新提取到的特征点new_features_this_grid保存到curr_features_ptr
+    vector<FeatureMetaData>& new_features_this_grid = grid_new_features[code];//new_features_this_grid是grid_new_features的引用，已经根据特征强度排好了序
 
     // 按照响应值从大到小取指定的特征点
     for (int k = 0; k < processor_config.grid_min_feature_num &&
@@ -461,7 +469,7 @@ void ImageProcessor::initializeFirstFrame() {
  */
 void ImageProcessor::predictFeatureTracking(
     const vector<cv::Point2f>& input_pts,
-    const cv::Matx33f& R_p_c,
+    const cv::Matx33f& R_p_c,//R_cur_last
     const cv::Vec4d& intrinsics,
     vector<cv::Point2f>& compensated_pts) {
 
@@ -479,9 +487,9 @@ void ImageProcessor::predictFeatureTracking(
       0.0, intrinsics[1], intrinsics[3],
       0.0, 0.0, 1.0);
 
-  // 单应性矩阵的计算，公式推到：
+  // 单应性矩阵的计算，公式推到(忽略了平移t):
   // x1 = K * X1_c; x2 = K * X2_c
-  // x2_c = H * x1_c; X1_C = R_2_1 * X2_c
+  // x2_c = H * x1_c; X1_C = R_1_2 * X2_c
   // x1 = K * R_1_2 * K^inv * x2 --> H = K * R_1_2 * K^inv
   // TUDO:这里应该还有平移向量，预测一个值所以可以去掉？
   cv::Matx33f H = K * R_p_c * K.inv();
@@ -517,7 +525,7 @@ void ImageProcessor::trackFeatures() {
   // 根据imu的信息对前后时刻的图像的旋转计算得到一个初值
   Matx33f cam0_R_p_c;
   Matx33f cam1_R_p_c;
-  integrateImuData(cam0_R_p_c, cam1_R_p_c);
+  integrateImuData(cam0_R_p_c, cam1_R_p_c);//R_previous_cur 上一帧到当前帧
 
   // Organize the features in the previous image.
   // 获取前一时刻的双目图像特征的信息
@@ -548,6 +556,7 @@ void ImageProcessor::trackFeatures() {
   vector<unsigned char> track_inliers(0);
 
   // 根据imu计算得到的旋转值以及单应性原理来预测当前帧的关键点位置
+  // 得到curr_cam0_points，归一化平面坐标
   predictFeatureTracking(prev_cam0_points,
       cam0_R_p_c, cam0_intrinsics, curr_cam0_points);
 
@@ -561,7 +570,7 @@ void ImageProcessor::trackFeatures() {
       TermCriteria(TermCriteria::COUNT+TermCriteria::EPS,
         processor_config.max_iteration,
         processor_config.track_precision),
-      cv::OPTFLOW_USE_INITIAL_FLOW);
+      cv::OPTFLOW_USE_INITIAL_FLOW);//使用了OPTFLOW_USE_INITIAL_FLOW标志位，需要提供下一帧的特征点位置初值，curr_cam0_points既是input也是output
 
   // Mark those tracked points out of the image region
   // as untracked.
@@ -622,7 +631,7 @@ void ImageProcessor::trackFeatures() {
   vector<unsigned char> match_inliers(0);
   stereoMatch(curr_tracked_cam0_points, curr_cam1_points, match_inliers);
 
-  vector<FeatureIDType> prev_matched_ids(0);
+  vector<FeatureIDType> prev_matched_ids(0);//typedef long long int FeatureIDType;
   vector<int> prev_matched_lifetime(0);
   vector<Point2f> prev_matched_cam0_points(0);
   vector<Point2f> prev_matched_cam1_points(0);
@@ -691,6 +700,7 @@ void ImageProcessor::trackFeatures() {
   for (const auto& item : *curr_features_ptr)
     curr_feature_num += item.second.size();
 
+  // 以0.5Hz频率发布
   ROS_INFO_THROTTLE(0.5,
       "\033[0;32m candidates: %d; track: %d; match: %d; ransac: %d/%d=%f\033[0m",
       before_tracking, after_tracking, after_matching,
@@ -864,6 +874,8 @@ void ImageProcessor::addNewFeatures() {
   // Select the ones with top response within each grid afterwards.
   vector<vector<KeyPoint> > new_feature_sieve(
       processor_config.grid_row*processor_config.grid_col);
+
+  //遍历新提取到的特征点，放入所在网格vector    
   for (const auto& feature : new_features) {
     int row = static_cast<int>(feature.pt.y / grid_height);
     int col = static_cast<int>(feature.pt.x / grid_width);
@@ -872,10 +884,15 @@ void ImageProcessor::addNewFeatures() {
   }
 
   new_features.clear();
+
+  // 遍历网格，对网格内的特征进行按照特征相应排序
   for (auto& item : new_feature_sieve) {
     if (item.size() > processor_config.grid_max_feature_num) {
+
       std::sort(item.begin(), item.end(),
           &ImageProcessor::keyPointCompareByResponse);
+      
+      // 删掉每个网格中超过提取数量阈值的点
       item.erase(
           item.begin()+processor_config.grid_max_feature_num, item.end());
     }
@@ -886,6 +903,7 @@ void ImageProcessor::addNewFeatures() {
 
   // Find the stereo matched points for the newly
   // detected features.
+  // 对新提取到的特征进行左右目匹配
   vector<cv::Point2f> cam0_points(new_features.size());
   for (int i = 0; i < new_features.size(); ++i)
     cam0_points[i] = new_features[i].pt;
@@ -912,6 +930,7 @@ void ImageProcessor::addNewFeatures() {
     ROS_WARN("Images at [%f] seems unsynced...",
         cam0_curr_img_ptr->header.stamp.toSec());
 
+  // 将新提取的特征放入网格
   // Group the features into grids
   GridFeatures grid_new_features;
   for (int code = 0; code <
@@ -943,12 +962,18 @@ void ImageProcessor::addNewFeatures() {
   // Collect new features within each grid with high response.
   for (int code = 0; code <
       processor_config.grid_row*processor_config.grid_col; ++code) {
+    
+    // features_this_grid是当前特征的引用
     vector<FeatureMetaData>& features_this_grid = (*curr_features_ptr)[code];
+
+    // new_features_this_grid是当前网格新特征的引用
     vector<FeatureMetaData>& new_features_this_grid = grid_new_features[code];
 
+    // 当前网格满了则进行下一个
     if (features_this_grid.size() >=
         processor_config.grid_min_feature_num) continue;
 
+    // 查看当前网格还有多少空位
     int vacancy_num = processor_config.grid_min_feature_num -
       features_this_grid.size();
     for (int k = 0;
@@ -994,6 +1019,7 @@ void ImageProcessor::pruneGridFeatures() {
  * @param new_intrinsics:新的内参矩阵,默认值
  *
  */
+// 返回校正后的归一化点，[u，v，1]的前两维
 void ImageProcessor::undistortPoints(
     const vector<cv::Point2f>& pts_in,
     const cv::Vec4d& intrinsics,
@@ -1043,6 +1069,7 @@ void ImageProcessor::undistortPoints(
  * @return pts_out:投影得到的图像点位置
  *
  */
+// 根据校正后的归一化坐标求像素坐标
 vector<cv::Point2f> ImageProcessor::distortPoints(
     const vector<cv::Point2f>& pts_in,
     const cv::Vec4d& intrinsics,
@@ -1229,6 +1256,15 @@ void ImageProcessor::twoPointRansac(
     pt.y = pt_hc[1];
   }
 
+
+
+  /*
+  以下代码的操作流程：
+  对所有关键点进行归一化处理：pts1 × scale， scale = 点的个数 / （所有点模长之和 × sqrt（2））
+  对norm_pixel_unit也要进行归一化
+  以50像素作为评判外点的阈值： (pts1_un - pts2_un) × scale > 50（像素） × 1/f × scale 
+  */  
+
   // Normalize the points to gain numerical stability.
   // 归一化关键点（去除模长）从而来提高数值稳定性
   float scaling_factor = 0.0f;
@@ -1322,13 +1358,17 @@ void ImageProcessor::twoPointRansac(
     // Randomly select two point pairs.
     // Although this is a weird way of selecting two pairs, but it
     // is able to efficiently avoid selecting repetitive pairs.
+    
     // 随机选择两个点对pair_idx1和pair_idx2（索引）
+
     // 先从保存内点索引的raw_inlier_idx中随机产生一个位置索引
-    // 随机产生一个索引差值
     int pair_idx1 = raw_inlier_idx[random_gen.uniformInteger(
         0, raw_inlier_idx.size()-1)];
+
+    // 随机产生一个索引差值
     int idx_diff = random_gen.uniformInteger(
         1, raw_inlier_idx.size()-1);
+
     // 产生第二个索引位置
     // 如果索引pair_idx1加上索引差超过最大值，则减去索引最大值
     int pair_idx2 = pair_idx1+idx_diff < raw_inlier_idx.size() ?
@@ -1340,13 +1380,18 @@ void ImageProcessor::twoPointRansac(
     Vector2d coeff_ty(coeff_t(pair_idx1, 1), coeff_t(pair_idx2, 1));
     Vector2d coeff_tz(coeff_t(pair_idx1, 2), coeff_t(pair_idx2, 2));
     vector<double> coeff_l1_norm(3);
+
+    // 求一范数（模长）
     coeff_l1_norm[0] = coeff_tx.lpNorm<1>();
     coeff_l1_norm[1] = coeff_ty.lpNorm<1>();
     coeff_l1_norm[2] = coeff_tz.lpNorm<1>();
+
+    //找到最小的一范数
     int base_indicator = min_element(coeff_l1_norm.begin(),
         coeff_l1_norm.end())-coeff_l1_norm.begin();
 
     Vector3d model(0.0, 0.0, 0.0);
+    //最小的一范数是tx方向的，则用y，z构造
     if (base_indicator == 0) {
       Matrix2d A;
       A << coeff_ty, coeff_tz;
@@ -1354,6 +1399,7 @@ void ImageProcessor::twoPointRansac(
       model(0) = 1.0;
       model(1) = solution(0);
       model(2) = solution(1);
+    //最小的一范数是ty方向的，则用x，z构造
     } else if (base_indicator ==1) {
       Matrix2d A;
       A << coeff_tx, coeff_tz;
@@ -1361,6 +1407,7 @@ void ImageProcessor::twoPointRansac(
       model(0) = solution(0);
       model(1) = 1.0;
       model(2) = solution(1);
+    //最小的一范数是tz方向的，则用x，y构造
     } else {
       Matrix2d A;
       A << coeff_tx, coeff_ty;
@@ -1371,6 +1418,7 @@ void ImageProcessor::twoPointRansac(
     }
 
     // Find all the inliers among point pairs.
+    // 每一行[y1-y2, -(x1-x2), x1y2 - x2y2]与model相乘
     VectorXd error = coeff_t * model;
 
     vector<int> inlier_set;
@@ -1455,7 +1503,7 @@ void ImageProcessor::twoPointRansac(
 void ImageProcessor::publish() {
 
   // Publish features.
-  CameraMeasurementPtr feature_msg_ptr(new CameraMeasurement);
+  CameraMeasurementPtr feature_msg_ptr(new CameraMeasurement);//在msg中定义了
   feature_msg_ptr->header.stamp = cam0_curr_img_ptr->header.stamp;
 
   vector<FeatureIDType> curr_ids(0);
@@ -1588,8 +1636,8 @@ void ImageProcessor::drawFeaturesStereo() {
   if(debug_stereo_pub.getNumSubscribers() > 0) {
     // Colors for different features.
     // 不同特征点用不同颜色显示
-    Scalar tracked(0, 255, 0);
-    Scalar new_feature(0, 255, 255);
+    Scalar tracked(0, 255, 0);//绿色
+    Scalar new_feature(0, 255, 255);//黄色
 
     static int grid_height =
             cam0_curr_img_ptr->image.rows / processor_config.grid_row;

@@ -149,7 +149,7 @@ bool MsckfVio::loadParameters() {
   Isometry3d T_cam0_imu = T_imu_cam0.inverse();
 
   // 相机与Imu之间的外参要估计，将其初值设为配置文件相关的值
-  state_server.imu_state.R_imu_cam0 = T_cam0_imu.linear().transpose();
+  state_server.imu_state.R_imu_cam0 = T_cam0_imu.linear().transpose();// 返回T的旋转部分
   state_server.imu_state.t_cam0_imu = T_cam0_imu.translation();
   CAMState::T_cam0_cam1 =
     utils::getTransformEigen(nh, "cam1/T_cn_cnm1");
@@ -236,12 +236,16 @@ bool MsckfVio::initialize() {
   // 连续时间下的噪声矩阵Q
   state_server.continuous_noise_cov =
     Matrix<double, 12, 12>::Zero();
+
   state_server.continuous_noise_cov.block<3, 3>(0, 0) =
     Matrix3d::Identity()*IMUState::gyro_noise;
+
   state_server.continuous_noise_cov.block<3, 3>(3, 3) =
     Matrix3d::Identity()*IMUState::gyro_bias_noise;
+
   state_server.continuous_noise_cov.block<3, 3>(6, 6) =
     Matrix3d::Identity()*IMUState::acc_noise;
+
   state_server.continuous_noise_cov.block<3, 3>(9, 9) =
     Matrix3d::Identity()*IMUState::acc_bias_noise;
 
@@ -251,6 +255,7 @@ bool MsckfVio::initialize() {
   for (int i = 1; i < 100; ++i) {
     boost::math::chi_squared chi_squared_dist(i);
     // quantile
+    // 定义如下：map<int, double> MsckfVio::chi_squared_test_table;
     chi_squared_test_table[i] =
       boost::math::quantile(chi_squared_dist, 0.05);
   }
